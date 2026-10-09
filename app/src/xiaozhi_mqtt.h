@@ -4,8 +4,9 @@
     #define GET_HEADER_BUFSZ 1024             // 头部大小
     #define GET_RESP_BUFSZ 1024               // 响应缓冲区大小
     #define GET_URL_LEN_MAX 256               // 网址最大长度
-    #define GET_URI "https://%s/xiaozhi/ota/" // 获取小智版本
-    #define XIAOZHI_HOST "api.tenclass.net"
+    /* 自建 xiaozhi-server-go：OTA 接口为 http://<IP>:8080/api/ota/ */
+    #define GET_URI "http://%s/api/ota/"      // 获取小智版本
+    #define XIAOZHI_HOST "172.16.210.218:8080" // 自建服务器局域网IP + Web端口
     #define XIAOZHI_WSPATH "/xiaozhi/v1/"
     #define XIAOZHI_TOKEN "Bearer 12345678"
 

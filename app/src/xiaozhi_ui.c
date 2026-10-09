@@ -26,6 +26,7 @@
 #include "../kws/app_recorder_process.h"
 #include "../board/board_hardware.h"
 #include "xiaozhi_screen.h"
+#include "pet_skin_draw.h"
 #include "charge.h"
 #include "bt_pan_ota.h"
 
@@ -218,6 +219,26 @@ lv_obj_t *battery_percent_label = NULL; // 电池电量百分比标签
 lv_obj_t *bluetooth_icon = NULL;//蓝牙图标
 lv_obj_t *img_emoji = NULL;//表情图标
 lv_obj_t *network_icon = NULL;//网络图标
+
+/* ===== 宠物换肤支持 ===== */
+static lv_timer_t *g_pet_state_timer = NULL;
+
+/* 把小智状态机映射到宠物活动态（聆听/说话 → 嘴动） */
+static void pet_state_sync_cb(lv_timer_t *t)
+{
+    (void)t;
+#if defined(XIAOZHI_USING_MQTT)
+    enum DeviceState st = mqtt_g_state;
+#else
+    enum DeviceState st = web_g_state;
+#endif
+    if (st == kDeviceStateListening)
+        pet_skin_set_activity("listening");
+    else if (st == kDeviceStateSpeaking)
+        pet_skin_set_activity("speaking");
+    else
+        pet_skin_set_activity("idle");
+}
 
 lv_obj_t *weather_bgimg;//天气背景图片
 lv_obj_t *weather_icon;//天气图标
@@ -869,6 +890,9 @@ rt_err_t xiaozhi_ui_obj_init()
     lv_obj_clear_flag(img_emoji, LV_OBJ_FLAG_SCROLLABLE);      /// Flags
     lv_img_set_zoom(img_emoji, (int)(LV_SCALE_NONE * g_scale)); // 根据缩放因子缩放
 
+    /* 宠物换肤：待机屏的官方表情图标隐藏，由主界面的雪人接管 */
+    lv_obj_add_flag(img_emoji, LV_OBJ_FLAG_HIDDEN);
+
     hour_tens_img = lv_img_create(standby_screen);
     LV_IMAGE_DECLARE(img_1);
     lv_img_set_src(hour_tens_img, &img_1);
@@ -1311,6 +1335,13 @@ rt_err_t xiaozhi_ui_obj_init()
     lv_obj_align(seqimg, LV_ALIGN_CENTER, 0, 0);
     lv_img_set_zoom(seqimg, (int)(LV_SCALE_NONE) * g_scale);
     lv_seqimg_play(seqimg);                     // 开始播放
+
+    /* ===== 宠物换肤：用自定义雪人取代官方序列表情 ===== */
+    lv_obj_add_flag(seqimg, LV_OBJ_FLAG_HIDDEN);   /* 隐藏官方 GIF 表情，由雪人接管 */
+    pet_skin_init(lv_screen_active());
+    /* 状态同步定时器：把小智状态机(listening/speaking)映射到宠物嘴动 */
+    if (g_pet_state_timer == NULL)
+        g_pet_state_timer = lv_timer_create(pet_state_sync_cb, 200, NULL);
 
 
 
@@ -2302,6 +2333,9 @@ font_medium = lv_tiny_ttf_create_data(xiaozhi_font, xiaozhi_font_size, medium_fo
                 case UI_MSG_UPDATE_EMOJI:
                     if(msg->data)
                     {
+                        /* 宠物换肤：服务器下发的 emotion 同步给雪人表情 */
+                        pet_skin_set_mood(msg->data);
+
                         if (strcmp(msg->data, "neutral") == 0)
                         {
                             lv_seqimg_src_array(seqimg, neutral, sizeof(neutral) / sizeof(neutral[0]));
