@@ -9,7 +9,7 @@
        - 对话 WebSocket 在 8000，且为明文 ws://（非 TLS）
        - XIAOZHI_HOST 只放纯 IP，不能带端口（否则 dns_gethostbyname 失败） */
     #define GET_URI "http://%s:8080/api/ota/" // 获取小智版本（OTA 走 8080）
-    #define XIAOZHI_HOST "192.168.31.178"      // 本机 WLAN IP（切换网络后更新；上云时改回 43.142.56.51）
+    #define XIAOZHI_HOST "192.168.138.1"       // PC 蓝牙 PAN 网关 IP（ICS 网关，板子经蓝牙共享上网时直连此地址绕过跨段拦截；上云时改回 43.142.56.51）
     #define XIAOZHI_WSPATH "/ws/device/"       // 自研 pet-ai 服务端 WS 路径
     #define XIAOZHI_WSPORT 8000                // 自建服务器 WS 明文端口
     #define XIAOZHI_TOKEN "Bearer 12345678"
