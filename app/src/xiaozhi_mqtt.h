@@ -4,10 +4,14 @@
     #define GET_HEADER_BUFSZ 1024             // 头部大小
     #define GET_RESP_BUFSZ 1024               // 响应缓冲区大小
     #define GET_URL_LEN_MAX 256               // 网址最大长度
-    /* 自建 xiaozhi-server-go：OTA 接口为 http://<IP>:8080/api/ota/ */
-    #define GET_URI "http://%s/api/ota/"      // 获取小智版本
-    #define XIAOZHI_HOST "172.16.210.218:8080" // 自建服务器局域网IP + Web端口
+    /* 自建 xiaozhi-server-go：
+       - Web/OTA 在 8080（GET_URI 已带 :8080）
+       - 对话 WebSocket 在 8000，且为明文 ws://（非 TLS）
+       - XIAOZHI_HOST 只放纯 IP，不能带端口（否则 dns_gethostbyname 失败） */
+    #define GET_URI "http://%s:8080/api/ota/" // 获取小智版本（OTA 走 8080）
+    #define XIAOZHI_HOST "172.16.210.218"      // 自建服务器局域网IP（不含端口）
     #define XIAOZHI_WSPATH "/xiaozhi/v1/"
+    #define XIAOZHI_WSPORT 8000                // 自建服务器 WS 明文端口
     #define XIAOZHI_TOKEN "Bearer 12345678"
 
 enum ListeningMode
