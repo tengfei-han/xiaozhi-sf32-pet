@@ -15,6 +15,7 @@
 #include "lwip/apps/mqtt.h"
 #include "xiaozhi_mqtt.h"
 #include "xiaozhi_websocket.h"
+#include "pet_skin_draw.h"
 #include "bf0_hal.h"
 #include "bts2_global.h"
 #include "bts2_app_pan.h"
@@ -67,18 +68,8 @@ L2_RET_BSS_SECT_END
 static char message[256] L2_RET_BSS_SECT(message);
 #endif
 static const char *mode_str[] = {"auto", "manual", "realtime"};
-static const char *hello_message =
-    "{"
-    "\"type\":\"hello\","
-    "\"version\": 3,"
-#ifdef CONFIG_IOT_PROTOCOL_MCP
-    "\"features\":{\"mcp\":true},"
-#endif
-    "\"transport\":\"websocket\","
-    "\"audio_params\":{"
-    "\"format\":\"opus\", \"sample_rate\":16000, \"channels\":1, "
-    "\"frame_duration\":60"
-    "}}";
+/* 上行音频帧缓冲：首字节 codec 头 + opus 数据（pet-ai 协议） */
+static uint8_t g_up_buf[512];
 
 // 倒计时动画
 static lv_obj_t *countdown_screen = NULL;
@@ -220,11 +211,32 @@ void ws_send_listen_stop(void *ws, char *session_id)
         rt_kprintf("websocket is not connected\n");
     }
 }
+/* pet-ai 自有协议：hello 必须带 device_id（服务端 pydantic 必填），version 用字符串。
+ * 动态构造（device_id 来自 chip_id），替换原静态 hello_message 的发送路径。 */
+extern char *get_client_id(void);
+static const char *hello_message_fmt =
+    "{"
+    "\"type\":\"hello\","
+    "\"device_id\":\"%s\","
+    "\"version\":\"3\","
+    "\"transport\":\"websocket\","
+    "\"audio_params\":{"
+    "\"format\":\"opus\", \"sample_rate\":16000, \"channels\":1, "
+    "\"frame_duration\":60"
+    "}}";
+
+static void build_hello(char *out, int sz)
+{
+    char *cid = get_client_id();
+    snprintf(out, sz, hello_message_fmt, cid ? cid : "unknown");
+}
+
 void ws_send_hello(void *ws)
 {
     if (g_xz_ws.is_connected == 1)
     {
-        wsock_write((wsock_state_t *)ws, hello_message, strlen(hello_message),
+        build_hello(message, sizeof(message));
+        wsock_write((wsock_state_t *)ws, message, strlen(message),
                     OPCODE_TEXT);
     }
     else
@@ -236,8 +248,14 @@ void xz_audio_send_using_websocket(uint8_t *data, int len)
 {
     if (g_xz_ws.is_connected == 1)
     {
-        err_t err = wsock_write(&g_xz_ws.clnt, data, len, OPCODE_BINARY);
-        // rt_kprintf("send audio = %d len=%d\n", err, len);
+        /* pet-ai 协议：二进制帧首字节 = codec 头（1=opus），其余为音频数据 */
+        if (len + 1 <= (int)sizeof(g_up_buf))
+        {
+            g_up_buf[0] = 1; /* PET_CODEC_OPUS */
+            memcpy(&g_up_buf[1], data, len);
+            err_t err = wsock_write(&g_xz_ws.clnt, g_up_buf, len + 1, OPCODE_BINARY);
+            // rt_kprintf("send audio = %d len=%d\n", err, len);
+        }
     }
     // else
     //     rt_kprintf("Websocket disconnected\n");
@@ -477,22 +495,35 @@ void parse_helLo(const u8_t *data, u16_t len)
         return;
     }
 
-    char *type = cJSON_GetObjectItem(root, "type")->valuestring;
-    rt_kprintf("type = %s\n", type);
-    if (strcmp(type, "hello") == 0)
+    cJSON *type_item = cJSON_GetObjectItem(root, "type");
+    if (!type_item || !type_item->valuestring)
     {
-        char *session_id = cJSON_GetObjectItem(root, "session_id")->valuestring;
-        rt_kprintf("session_id = %s\n", session_id);
+        rt_kprintf("no type field\r\n");
+        cJSON_Delete(root);
+        return;
+    }
+    char *type = type_item->valuestring;
+    rt_kprintf("type = %s\n", type);
+    /* pet-ai 协议：服务端回 hello_ack（无 audio_params），兼容原 hello */
+    if (strcmp(type, "hello_ack") == 0 || strcmp(type, "hello") == 0)
+    {
+        cJSON *sid = cJSON_GetObjectItem(root, "session_id");
+        if (sid && sid->valuestring)
+        {
+            rt_kprintf("session_id = %s\n", sid->valuestring);
+            strncpy(g_xz_ws.session_id, sid->valuestring,
+                    sizeof(g_xz_ws.session_id) - 1);
+        }
         cJSON *audio_param = cJSON_GetObjectItem(root, "audio_params");
-        char *sample_rate =
-            cJSON_GetObjectItem(audio_param, "sample_rate")->valuestring;
-        char *duration =
-            cJSON_GetObjectItem(audio_param, "duration")->valuestring;
-        g_xz_ws.sample_rate = atoi(sample_rate);
-        g_xz_ws.frame_duration = atoi(duration);
-        strncpy(g_xz_ws.session_id, session_id, 9);
+        if (audio_param) /* 小智原生 hello 才有；pet-ai hello_ack 没有 */
+        {
+            cJSON *sr = cJSON_GetObjectItem(audio_param, "sample_rate");
+            cJSON *du = cJSON_GetObjectItem(audio_param, "duration");
+            if (sr && sr->valuestring) g_xz_ws.sample_rate = atoi(sr->valuestring);
+            if (du && du->valuestring) g_xz_ws.frame_duration = atoi(du->valuestring);
+        }
         web_g_state = kDeviceStateIdle;
-        
+
         rt_kprintf("exit sniff mode\n");
         bt_interface_exit_sniff_mode(
             (unsigned char *)&g_bt_app_env.bd_addr); // exit sniff mode
@@ -504,19 +535,52 @@ void parse_helLo(const u8_t *data, u16_t len)
         send_iot_states();      // 发送iot状态
 #endif// CONFIG_IOT_PROTOCOL_MCP
         xiaozhi_ui_chat_status("待命中...");
-        xiaozhi_ui_chat_output("小智已连接!");
+        xiaozhi_ui_chat_output("灵儿已连接!");
         xiaozhi_ui_update_emoji("neutral");
         xiaozhi_ui_update_standby_emoji("funny");
         rt_kprintf("hello->对话\n");
         ui_switch_to_xiaozhi_screen();//切换到小智对话界面
-#ifdef PKG_XIAOZHI_USING_AEC
-        ws_send_listen_start(&g_xz_ws.clnt, g_xz_ws.session_id, kListeningModeAlwaysOn);
-#endif
     }
-    else if (strcmp(type, "goodbye") == 0)
+    else if (strcmp(type, "emote") == 0)
+    {
+        /* pet-ai：宠物表情/动作 → 雪人 UI */
+        cJSON *m = cJSON_GetObjectItem(root, "mood");
+        cJSON *a = cJSON_GetObjectItem(root, "action");
+        const char *mood = (m && m->valuestring) ? m->valuestring : "idle";
+        const char *act = (a && a->valuestring) ? a->valuestring : NULL;
+        pet_skin_set_mood(mood);
+        if (act)
+            pet_skin_set_activity(act);
+        if (strcmp(mood, "speaking") == 0)
+        {
+            web_g_state = kDeviceStateSpeaking;
+            xz_speaker(1);
+        }
+        else if (strcmp(mood, "listening") == 0)
+        {
+            web_g_state = kDeviceStateListening;
+        }
+        else if (strcmp(mood, "idle") == 0)
+        {
+            web_g_state = kDeviceStateIdle;
+            xz_speaker(0);
+        }
+        lv_display_trigger_activity(NULL);
+    }
+    else if (strcmp(type, "llm_text") == 0)
+    {
+        /* pet-ai：LLM 回复文本 → 对话框显示 */
+        cJSON *tx = cJSON_GetObjectItem(root, "text");
+        if (tx && tx->valuestring)
+            xiaozhi_ui_tts_output(tx->valuestring);
+        last_listen_tick = rt_tick_get();
+        lv_display_trigger_activity(NULL);
+    }
+    else if (strcmp(type, "session_end") == 0 || strcmp(type, "goodbye") == 0)
     {
         web_g_state = kDeviceStateUnknown;
         rt_kprintf("session ended\n");
+        pet_skin_set_activity("idle");
         xiaozhi_ui_chat_status("睡眠中...");
         xiaozhi_ui_chat_output("等待唤醒...");
         xiaozhi_ui_update_emoji("sleep");
@@ -698,8 +762,9 @@ void xiaozhi_ws_connect(void)
                 rt_kprintf("g_xz_ws.is_connected = %d\n", g_xz_ws.is_connected);
                 if (g_xz_ws.is_connected)
                 {
-                    err = wsock_write(&g_xz_ws.clnt, hello_message,
-                                      strlen(hello_message), OPCODE_TEXT);
+                    build_hello(message, sizeof(message));
+                    err = wsock_write(&g_xz_ws.clnt, message,
+                                      strlen(message), OPCODE_TEXT);
 
                     rt_kprintf("Web socket write %d\r\n", err);
                     break;
