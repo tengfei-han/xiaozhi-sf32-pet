@@ -2153,7 +2153,11 @@ font_medium = lv_tiny_ttf_create_data(xiaozhi_font, xiaozhi_font_size, medium_fo
                 case UI_MSG_STANDBY_CHAT_OUTPUT:
                     if(msg->data)
                     {
-                        lv_label_set_text(ui_Label3, msg->data);    
+                        lv_label_set_text(ui_Label3, msg->data);
+                        /* 雪人皮肤(pet_skin)是后创建的，默认图层在文字之上，会把
+                           "请按键连接小智"等提示文字遮住。每次刷新文字都把它提到
+                           最上层，保证提示始终可见。 */
+                        lv_obj_move_foreground(ui_Label3);
                     }
                     break;
                 case UI_MSG_UPDATE_WEATHER_AND_TIME:
@@ -2252,7 +2256,9 @@ font_medium = lv_tiny_ttf_create_data(xiaozhi_font, xiaozhi_font_size, medium_fo
                 case UI_MSG_CHAT_OUTPUT:
                     if(msg->data)
                     {
-                        lv_label_set_text(global_label2, msg->data);    
+                        lv_label_set_text(global_label2, msg->data);
+                        /* 同上：雪人皮肤图层在文字之上，刷新对话文字时提到最上层 */
+                        lv_obj_move_foreground(global_label2);
                     }
                     break;
                 case UI_MSG_VOLUME_UPDATE:
