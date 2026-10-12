@@ -1700,6 +1700,19 @@ static void create_ptt_button(lv_obj_t *parent)
 
 static void ptt_start(xz_audio_t *thiz)
 {
+    // ⚠️ 播报期间绝不能开麦：解码线程正在占用音频设备，此时
+    //    xz_aec_mic_open() / xz_speaker(0) 会和它抢资源 → 卡死甚至死机。
+    //    现象：语音播报时按 KEY1 → 一直卡在"聆听中" → 死机。
+    //    这里只发打断指令，等服务端回 tts stop（web_g_state 回 idle）后再开麦。
+    if (web_g_state == kDeviceStateSpeaking)
+    {
+        ws_send_speak_abort(&g_xz_ws.clnt, g_xz_ws.session_id,
+                            kAbortReasonWakeWordDetected);
+        xiaozhi_ui_chat_status("正在讲话，稍候...");
+        rt_kprintf("PTT ignored: speaking, abort only\n");
+        return;
+    }
+
     ws_send_speak_abort(&g_xz_ws.clnt, g_xz_ws.session_id,
                         kAbortReasonWakeWordDetected);
     xz_speaker(0); // 关闭扬声器，避免播放自己的回声
