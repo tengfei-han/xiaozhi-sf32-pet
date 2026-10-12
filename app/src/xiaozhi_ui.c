@@ -261,6 +261,10 @@ extern xz_audio_t xz_audio;
 extern rt_mailbox_t g_battery_mb;
 xz_audio_t *thiz = &xz_audio;
 
+// PTT 开关状态：单击 KEY1 在"开始/结束"之间切换。
+// 不用"按住说话"是因为 KEY1 长按会走板级电源路径（表现为自动重启）。
+static bool g_ptt_listening = false;
+
 
 // 全局变量存储当前电池电量
 static int g_battery_level = 60;        // 默认为满电
@@ -1577,6 +1581,49 @@ void xiaozhi_ui_chat_status(char *string) // top text
     }
 }
 
+/* ------------------------------------------------------------------
+ * PTT 开始/结束：物理按键、VAD 自动检测、KWS 唤醒三个入口统一走这里
+ * ------------------------------------------------------------------ */
+
+static void ptt_start(xz_audio_t *thiz)
+{
+    ws_send_speak_abort(&g_xz_ws.clnt, g_xz_ws.session_id,
+                        kAbortReasonWakeWordDetected);
+    xz_speaker(0); // 关闭扬声器，避免播放自己的回声
+#ifdef BSP_USING_PM
+    if (!thiz->vad_enabled)
+    {
+        thiz->vad_enabled = true;
+        xz_aec_mic_open(thiz);
+    }
+#endif
+    // 明确告诉服务端"一句话开始了"（服务端据此清空音频缓冲）
+    ws_send_listen_start(&g_xz_ws.clnt, g_xz_ws.session_id,
+                         kListeningModeManualStop);
+    g_ptt_listening = true;
+    xiaozhi_ui_chat_status("聆听中...");
+    rt_kprintf("PTT start\n");
+}
+
+static void ptt_stop(xz_audio_t *thiz)
+{
+    // ⚠️ 必须无条件发 stop！原代码这行被 `#if !PKG_XIAOZHI_USING_AEC` 包住，
+    //    而 app/src/SConscript 里 PKG_XIAOZHI_USING_AEC=1 → 整段被编译掉，
+    //    服务端永远收不到"说完了" → 表现为"说话后没反应"。
+    ws_send_listen_stop(&g_xz_ws.clnt, g_xz_ws.session_id);
+#ifdef PKG_XIAOZHI_USING_AEC
+    xz_aec_mic_close(thiz);
+    // 关麦后必须把标志位复位，否则下一次 ptt_start 里的
+    // `if (!thiz->vad_enabled)` 进不去 → 第二句话开始麦克风再也打不开。
+    thiz->vad_enabled = false;
+#else
+    xz_mic(0);
+#endif
+    g_ptt_listening = false;
+    xiaozhi_ui_chat_status("待命中...");
+    rt_kprintf("PTT stop\n");
+}
+
 void xiaozhi_ui_reinit_audio(void)
 {
     if (ui_msg_queue != RT_NULL) {
@@ -2110,26 +2157,33 @@ font_medium = lv_tiny_ttf_create_data(xiaozhi_font, xiaozhi_font_size, medium_fo
             switch (btn_event)
             {
             case BUTTON_EVENT_PRESSED:
-                    ws_send_speak_abort(&g_xz_ws.clnt, g_xz_ws.session_id,kAbortReasonWakeWordDetected);                                           
-                    xz_speaker(0); // 关闭扬声器
-					rt_kprintf("vad_enabled jjjjjk\n");
-#ifdef BSP_USING_PM
-                    if(!thiz->vad_enabled)
-                    {
-                        rt_kprintf("vad_enabled\n");
-                        thiz->vad_enabled = true;
-                        xz_aec_mic_open(thiz);    
-                    }
-#endif                                       
-                xiaozhi_ui_chat_status("聆听中...");
+                // VAD/KWS 入口（xiaozhi_audio.c 自动语音检测检测到人声）：开始聆听。
+                // 物理 KEY1 已不再走这里（长按会触发板级电源路径 → 重启），
+                // 物理按键改走 BUTTON_EVENT_CLICKED 做"开始/结束"切换。
+                if (!g_ptt_listening)
+                {
+                    ptt_start(thiz);
+                }
                 break;
-                
+
+            case BUTTON_EVENT_CLICKED:
+                // 物理 KEY1 单击 = 开始 / 结束 切换
+                if (g_ptt_listening)
+                {
+                    ptt_stop(thiz);
+                }
+                else
+                {
+                    ptt_start(thiz);
+                }
+                break;
+
             case BUTTON_EVENT_RELEASED:
-                xiaozhi_ui_chat_status("待命中...");
-#if !PKG_XIAOZHI_USING_AEC  
-                ws_send_listen_stop(&g_xz_ws.clnt, g_xz_ws.session_id);
-                xz_mic(0);
-#endif // !PKG_XIAOZHI_USING_AEC                
+                // VAD 检测到静音（说完了）：结束聆听并通知服务端
+                if (g_ptt_listening)
+                {
+                    ptt_stop(thiz);
+                }
                 break;
 
             default:

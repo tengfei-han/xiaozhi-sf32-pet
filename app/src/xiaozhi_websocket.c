@@ -344,14 +344,25 @@ static void xz_button_event_handler(int32_t pin, button_action_t action)
         rt_kprintf("按键->对话");
 
         // 检查是否弹窗显示中
-
         xiaozhi_ui_update_confirm_button_event(1); // 模拟点击更新按钮
 
         if (now_screen == standby_screen)
         {
             ui_switch_to_xiaozhi_screen();
         }
-    
+        // ⚠️ 按下时**不开麦**。KEY1 长按会走板级电源路径(表现为重启)，
+        //    所以交互改成"单击切换 开始/结束"，逻辑见 BUTTON_CLICKED 分支。
+    }
+    else if (action == BUTTON_CLICKED)
+    {
+        // 单击 = 开始/结束切换（由 UI 线程里的 g_ptt_listening 状态机决定）
+        rt_kprintf("clicked -> toggle listen\r\n");
+        lv_obj_t *now_screen = lv_screen_active();
+        if (now_screen == standby_screen)
+        {
+            ui_switch_to_xiaozhi_screen();
+        }
+
         // 1. 检查是否处于睡眠状态（WebSocket未连接）
         if (!g_xz_ws.is_connected)
         {
@@ -360,9 +371,7 @@ static void xz_button_event_handler(int32_t pin, button_action_t action)
         }
         else
         {
-            // 2. 已唤醒，直接进入对话模式
-            rt_mb_send(g_button_event_mb, BUTTON_EVENT_PRESSED);
-            xiaozhi_ui_chat_status("聆听中...");
+            rt_mb_send(g_button_event_mb, BUTTON_EVENT_CLICKED);
         }
     }
     else if (action == BUTTON_RELEASED)
@@ -371,12 +380,12 @@ static void xz_button_event_handler(int32_t pin, button_action_t action)
         gui_pm_fsm(GUI_PM_ACTION_WAKEUP);
 #endif
         rt_kprintf("released\r\n");
-        // 仅在已唤醒时发送停止监听
-        if (g_xz_ws.is_connected)
-        {
-            rt_mb_send(g_button_event_mb, BUTTON_EVENT_RELEASED);
-            xiaozhi_ui_chat_status("待命中...");
-        }
+        // 单击切换模式下，松开不做任何事（停止由下一次单击触发）
+    }
+    else if (action == BUTTON_LONG_PRESSED)
+    {
+        // 长按忽略：KEY1 长按在部分板型上会触发 PMU 电源路径，这里不做任何处理
+        rt_kprintf("long pressed ignored\r\n");
     }
 }
 #ifndef XIAOZHI_USING_MQTT
@@ -388,7 +397,11 @@ void simulate_button_pressed()
         rt_kprintf("Initiate_disconnection_flag\r\n");
         return;
     }
-    xz_button_event_handler(BSP_KEY1_PIN, BUTTON_PRESSED);
+    // VAD（xiaozhi_audio.c 自动语音检测）/ KWS 唤醒词入口。
+    // ⚠️ 直接发 mailbox，不再绕 xz_button_event_handler：
+    //    那个 handler 里有 `if (last_action == action) return;` 去重，
+    //    连续两次 PRESSED 会被吞掉，导致 VAD 触发的第二句话失效。
+    rt_mb_send(g_button_event_mb, BUTTON_EVENT_PRESSED);
 }
 void simulate_button_released()
 {
@@ -397,7 +410,8 @@ void simulate_button_released()
     {
         return;
     }
-    xz_button_event_handler(BSP_KEY1_PIN, BUTTON_RELEASED);
+    // VAD 检测到静音 → 结束聆听并通知服务端（见 ui.c 的 ptt_stop）
+    rt_mb_send(g_button_event_mb, BUTTON_EVENT_RELEASED);
 }
 #endif
 

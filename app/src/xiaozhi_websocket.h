@@ -45,6 +45,7 @@ void ws_send_listen_stop(void *ws, char *session_id);
         BUTTON_EVENT_NONE,
         BUTTON_EVENT_PRESSED,
         BUTTON_EVENT_RELEASED,
+        BUTTON_EVENT_CLICKED,   // 单击（按下后松开）→ 用于"开始/结束"切换
     } button_event_type_t;
 
 #ifdef __cplusplus
