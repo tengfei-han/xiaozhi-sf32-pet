@@ -79,8 +79,8 @@ typedef enum {
     UI_MSG_SHOW_UPDATE_CONFIRM,
     UI_MSG_UPDATE_LATEST_VERSION,
     UI_MSG_CONFIRM_BUTTON_EVENT,
-    UI_MSG_REINIT_AUDIO  
-
+    UI_MSG_REINIT_AUDIO,
+    UI_MSG_PTT_BUTTON      // 屏幕 PTT 按钮状态：data="1" 聆听中 / "0" 待命
 } ui_msg_type_t;
 
 // 定义UI消息结构
@@ -261,9 +261,17 @@ extern xz_audio_t xz_audio;
 extern rt_mailbox_t g_battery_mb;
 xz_audio_t *thiz = &xz_audio;
 
-// PTT 开关状态：单击 KEY1 在"开始/结束"之间切换。
-// 不用"按住说话"是因为 KEY1 长按会走板级电源路径（表现为自动重启）。
+// PTT 开关状态：物理 KEY1 单击在"开始/结束"之间切换。
+// 不用"按住说话"是因为 KEY1 长按会走板级电源路径（表现为自动重启）；
+// 触摸屏走 create_ptt_button() 的按钮，可以真正"按住说话/松开发送"。
 static bool g_ptt_listening = false;
+
+/* 屏幕 PTT 按钮（触摸屏按住说话），定义在文件后半部分 */
+static lv_obj_t *ptt_btn = NULL;
+static lv_obj_t *ptt_btn_label = NULL;
+static void create_ptt_button(lv_obj_t *parent);
+static void ptt_button_event_handler(lv_event_t *e);
+void xiaozhi_ui_ptt_button_state(bool listening);
 
 
 // 全局变量存储当前电池电量
@@ -1369,6 +1377,11 @@ rt_err_t xiaozhi_ui_obj_init()
     lv_obj_set_style_text_align(global_label2, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(global_label2, LV_ALIGN_TOP_MID, 0, 30);
 
+    /* ===== 屏幕 PTT 按钮：触摸屏"按住说话 / 松开发送" =====
+     * 物理 KEY1 长按会走板级电源路径(重启)，所以按键改成单击切换；
+     * 触摸屏没有这个问题，这里做成真正的按住说话。 */
+    create_ptt_button(text_container);
+
     show_startup_animation();
     
     return RT_EOK;
@@ -1582,7 +1595,107 @@ void xiaozhi_ui_chat_status(char *string) // top text
 }
 
 /* ------------------------------------------------------------------
- * PTT 开始/结束：物理按键、VAD 自动检测、KWS 唤醒三个入口统一走这里
+ * 屏幕 PTT 按钮：触摸屏"按住说话 / 松开发送"
+ * 物理 KEY1 长按会走板级电源路径(重启)，触摸按钮没有这个问题，
+ * 所以这里用真正的按下/松开语义，比单击切换更符合直觉。
+ * ------------------------------------------------------------------ */
+
+static void ptt_button_event_handler(lv_event_t *e)
+{
+    lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_PRESSED)
+    {
+        // 按下 = 开始聆听（ui 线程里走 ptt_start）
+        rt_mb_send(g_button_event_mb, BUTTON_EVENT_PRESSED);
+    }
+    else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST)
+    {
+        // 松手 / 手指划出按钮 = 结束并发送（走 ptt_stop，会发 listen stop）
+        rt_mb_send(g_button_event_mb, BUTTON_EVENT_RELEASED);
+    }
+}
+
+static void ptt_button_update(bool listening)
+{
+    if (ptt_btn_label == NULL)
+    {
+        return;
+    }
+    if (listening)
+    {
+        lv_label_set_text(ptt_btn_label, "松开 发送");
+        lv_obj_set_style_bg_color(ptt_btn, lv_color_hex(0xE23C3C), 0);
+    }
+    else
+    {
+        lv_label_set_text(ptt_btn_label, "按住 说话");
+        lv_obj_set_style_bg_color(ptt_btn, lv_color_hex(0x2E7DF6), 0);
+    }
+}
+
+void xiaozhi_ui_ptt_button_state(bool listening)
+{
+    // 走 UI 消息队列：LVGL 对象只能在 LVGL 线程里操作，ui 线程不能直接摸
+    if (ui_msg_queue == RT_NULL)
+    {
+        return;
+    }
+    ui_msg_t *msg = (ui_msg_t *)rt_malloc(sizeof(ui_msg_t));
+    if (msg == RT_NULL)
+    {
+        return;
+    }
+    msg->type = UI_MSG_PTT_BUTTON;
+    msg->data = ui_strdup(listening ? "1" : "0");
+    if (rt_mq_send(ui_msg_queue, &msg, sizeof(ui_msg_t *)) != RT_EOK)
+    {
+        rt_free(msg->data);
+        rt_free(msg);
+    }
+}
+
+static void create_ptt_button(lv_obj_t *parent)
+{
+    if (ptt_btn != NULL)
+    {
+        return; // 只创建一次
+    }
+    ptt_btn = lv_button_create(parent);
+    lv_obj_remove_flag(ptt_btn, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(ptt_btn, 140, 56);
+    lv_obj_align(ptt_btn, LV_ALIGN_BOTTOM_MID, 0, -10);
+    lv_obj_set_style_bg_color(ptt_btn, lv_color_hex(0x2E7DF6), 0);
+    lv_obj_set_style_bg_opa(ptt_btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(ptt_btn, 28, 0);
+
+    ptt_btn_label = lv_label_create(ptt_btn);
+    lv_label_set_text(ptt_btn_label, "按住 说话");
+    lv_obj_center(ptt_btn_label);
+    lv_obj_set_style_text_color(ptt_btn_label, lv_color_hex(0xFFFFFF), 0);
+
+    lv_obj_add_event_cb(ptt_btn, ptt_button_event_handler, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(ptt_btn, ptt_button_event_handler, LV_EVENT_RELEASED, NULL);
+    lv_obj_add_event_cb(ptt_btn, ptt_button_event_handler, LV_EVENT_PRESS_LOST, NULL);
+
+    // ⚠️ 层级：雪人皮肤 pet_skin_init(lv_screen_active()) 建于 main_container 之后，
+    //    默认会盖住容器里的文字和按钮。lv_obj_move_foreground 只对同级兄弟生效，
+    //    所以要沿着父链一路提到 screen 层级最前。main_container 背景是 LV_OPA_0
+    //    全透明，提上来不会遮住雪人，但文字/按钮会正确显示在雪人之上。
+    lv_obj_move_foreground(ptt_btn);
+    lv_obj_t *p = lv_obj_get_parent(ptt_btn);          // text_container
+    if (p != NULL)
+    {
+        lv_obj_move_foreground(p);
+        lv_obj_t *pp = lv_obj_get_parent(p);           // main_container
+        if (pp != NULL)
+        {
+            lv_obj_move_foreground(pp);
+        }
+    }
+}
+
+/* ------------------------------------------------------------------
+ * PTT 开始/结束：物理按键、屏幕按钮、VAD 自动检测、KWS 唤醒统一走这里
  * ------------------------------------------------------------------ */
 
 static void ptt_start(xz_audio_t *thiz)
@@ -1601,6 +1714,7 @@ static void ptt_start(xz_audio_t *thiz)
     ws_send_listen_start(&g_xz_ws.clnt, g_xz_ws.session_id,
                          kListeningModeManualStop);
     g_ptt_listening = true;
+    xiaozhi_ui_ptt_button_state(true);   // 屏幕按钮变红："松开 发送"
     xiaozhi_ui_chat_status("聆听中...");
     rt_kprintf("PTT start\n");
 }
@@ -1620,6 +1734,7 @@ static void ptt_stop(xz_audio_t *thiz)
     xz_mic(0);
 #endif
     g_ptt_listening = false;
+    xiaozhi_ui_ptt_button_state(false);  // 屏幕按钮回蓝："按住 说话"
     xiaozhi_ui_chat_status("待命中...");
     rt_kprintf("PTT stop\n");
 }
@@ -2300,6 +2415,12 @@ font_medium = lv_tiny_ttf_create_data(xiaozhi_font, xiaozhi_font_size, medium_fo
                     break;
                 case UI_MSG_TIME_UPDATE:
                     time_ui_update_callback();
+                    break;
+                case UI_MSG_PTT_BUTTON:
+                    if (msg->data)
+                    {
+                        ptt_button_update(strcmp(msg->data, "1") == 0);
+                    }
                     break;
                 case UI_MSG_CHAT_STATUS:
                     if(msg->data)
