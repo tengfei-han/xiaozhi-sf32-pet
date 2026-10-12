@@ -266,6 +266,10 @@ xz_audio_t *thiz = &xz_audio;
 // 触摸屏走 create_ptt_button() 的按钮，可以真正"按住说话/松开发送"。
 static bool g_ptt_listening = false;
 
+// ⚠️ KEY1 单击去抖：快速连按会反复开关麦，音频线程运行中被 audio_close 触发
+//    野指针 → 硬fault 死机。两次有效切换之间至少间隔 400ms。
+static rt_tick_t g_ptt_last_click_tick = 0;
+
 /* 屏幕 PTT 按钮（触摸屏按住说话），定义在文件后半部分 */
 static lv_obj_t *ptt_btn = NULL;
 static lv_obj_t *ptt_btn_label = NULL;
@@ -1713,6 +1717,13 @@ static void ptt_start(xz_audio_t *thiz)
         return;
     }
 
+    // 幂等：已经在聆听就不重复开麦（避免快速连按导致重复开关麦死机）
+    if (g_ptt_listening)
+    {
+        rt_kprintf("PTT start ignored: already listening\n");
+        return;
+    }
+
     ws_send_speak_abort(&g_xz_ws.clnt, g_xz_ws.session_id,
                         kAbortReasonWakeWordDetected);
     xz_speaker(0); // 关闭扬声器，避免播放自己的回声
@@ -1734,6 +1745,13 @@ static void ptt_start(xz_audio_t *thiz)
 
 static void ptt_stop(xz_audio_t *thiz)
 {
+    // 幂等：没在聆听就不重复关麦/发 stop（避免快速连按反复关麦死机）
+    if (!g_ptt_listening)
+    {
+        rt_kprintf("PTT stop ignored: not listening\n");
+        return;
+    }
+
     // ⚠️ 必须无条件发 stop！原代码这行被 `#if !PKG_XIAOZHI_USING_AEC` 包住，
     //    而 app/src/SConscript 里 PKG_XIAOZHI_USING_AEC=1 → 整段被编译掉，
     //    服务端永远收不到"说完了" → 表现为"说话后没反应"。
@@ -2296,6 +2314,16 @@ font_medium = lv_tiny_ttf_create_data(xiaozhi_font, xiaozhi_font_size, medium_fo
 
             case BUTTON_EVENT_CLICKED:
                 // 物理 KEY1 单击 = 开始 / 结束 切换
+                // ⚠️ 去抖：400ms 内的重复单击忽略，防止快速连按反复开关麦死机
+                {
+                    rt_tick_t now = rt_tick_get();
+                    if (now - g_ptt_last_click_tick < rt_tick_from_millisecond(400))
+                    {
+                        rt_kprintf("KEY1 click debounced\n");
+                        break;
+                    }
+                    g_ptt_last_click_tick = now;
+                }
                 if (g_ptt_listening)
                 {
                     ptt_stop(thiz);
